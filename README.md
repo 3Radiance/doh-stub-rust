@@ -1,5 +1,8 @@
 # doh-stub
 
+[![CI](https://github.com/ImSavsis/doh-stub/actions/workflows/ci.yml/badge.svg)](https://github.com/ImSavsis/doh-stub/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/ImSavsis/doh-stub.svg)](https://github.com/ImSavsis/doh-stub/blob/master/LICENSE)
+
 локальный DNS-резолвер на C++, который сам ходит наружу по DNS-over-HTTPS. провайдер/DPI видит только HTTPS к cloudflare, а не голые DNS-запросы.
 
 ```mermaid
