@@ -1,0 +1,15 @@
+# doh-stub
+
+> Local DNS server in C++ that forwards every query over DNS-over-HTTPS (via WinHTTP) instead of plaintext UDP, so an ISP or DPI box only sees HTTPS traffic to the resolver.
+
+Written for Windows, built with CMake and MSVC. Zero third-party dependencies, uses WinHTTP for the HTTPS leg.
+
+## Docs
+
+- [README](https://github.com/ImSavsis/doh-stub/blob/master/README.md): build and usage instructions, architecture diagram
+- [src/main.cpp](https://github.com/ImSavsis/doh-stub/blob/master/src/main.cpp): UDP listener + DoH forwarding logic
+
+## Notes
+
+- No response caching, every query is a fresh HTTPS request
+- Binding port 53 to replace the system resolver needs administrator rights
