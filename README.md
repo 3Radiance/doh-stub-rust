@@ -1,0 +1,30 @@
+# doh-stub
+
+локальный DNS-резолвер на C++, который сам ходит наружу по DNS-over-HTTPS. провайдер/DPI видит только HTTPS к cloudflare, а не голые DNS-запросы.
+
+```mermaid
+sequenceDiagram
+    OS->>doh-stub: обычный DNS-запрос (UDP)
+    doh-stub->>Cloudflare: тот же запрос, но внутри HTTPS POST
+    Cloudflare->>doh-stub: ответ внутри HTTPS
+    doh-stub->>OS: обычный DNS-ответ (UDP)
+```
+
+## сборка
+
+```
+cmake -B build
+cmake --build build --config Release
+```
+
+## юзать
+
+```
+build\Release\dohstub.exe --port 5300
+```
+
+по умолчанию слушает `127.0.0.1:5300` и форвардит на `cloudflare-dns.com`. чтобы реально подменить системный DNS — нужен порт 53 и админ, плюс прописать `127.0.0.1` в настройках сети.
+
+## что не умеет
+
+не кэширует ответы, каждый запрос — новый HTTPS-коннект. для личного использования хватает, для нагрузки — нет.
