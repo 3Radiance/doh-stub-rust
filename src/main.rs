@@ -1,9 +1,10 @@
 use clap::Parser;
-use reqwest::Client;
 use std::net::SocketAddr;
 use std::result;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use wreq::Client;
+use wreq_util::Emulation;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Кроссплатформенный DoH-stub на Rust")]
@@ -19,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     let socket = UdpSocket::bind(&addr).await?;
-    let client = Client::new();
+    let client = Client::builder().emulation(Emulation::Firefox136).build()?;
     let socket = Arc::new(socket);
     let mut buf = [0u8; 512];
     loop {
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 async fn doh_forward(
-    client: &Client,
+    client: &wreq::Client,
     url: &str,
     q: Vec<u8>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
