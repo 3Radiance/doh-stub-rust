@@ -1,65 +1,94 @@
 # doh-stub
 
+**[Читать на русском →](./README.ru.md)**
+
 [![CI](https://github.com/ImSavsis/doh-stub/actions/workflows/ci.yml/badge.svg)](https://github.com/ImSavsis/doh-stub/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/ImSavsis/doh-stub.svg)](https://github.com/ImSavsis/doh-stub/blob/master/LICENSE)
 
-Кроссплатформенный локальный DNS-over-HTTPS (DoH) резолвер на Rust. Преобразует обычные локальные UDP DNS-запросы в шифрованные HTTPS POST-запросы к DoH-провайдеру.
+Cross-platform local DNS-over-HTTPS (DoH) resolver written in Rust. Converts standard local UDP DNS queries into encrypted HTTPS POST requests to a DoH provider.
 
-Умеет ходить на DoH-серверы напрямую по IP в обход системного DNS, сохранять найденные провайдеры в локальный JSON-конфиг.
+Connects directly to DoH servers by IP, bypassing system DNS. Discovers and caches new providers in a local JSON config.
 
 ```mermaid
 sequenceDiagram
-    participant OS as Система (UDP)
+    participant OS as System (UDP)
     participant Stub as doh-stub-rust
     participant JSON as bootstrap.json
     participant DoH as DoH Provider (HTTPS)
 
-    OS->>Stub: Обычный DNS-запрос (UDP:53/5300)
-    Note over Stub: Проверка bootstrap.json / Резолв IP
+    OS->>Stub: Standard DNS query (UDP:53/5300)
+    Note over Stub: Check bootstrap.json / Resolve IP / Fallback
     Stub->>DoH: HTTPS POST (Direct IP + SNI Emulation)
-    DoH->>Stub: Ответ (application/dns-message)
-    Stub->>OS: Обычный DNS-ответ (UDP)
+    DoH->>Stub: Response (application/dns-message)
+    Stub->>OS: Standard DNS response (UDP)
 ```
 
-## Особенности
+## Features
 
-- **Прямое подставление IP (resolve)** — Не зависит от системного DNS для поиска IP-адреса самого DoH-сервера.
-- **Bootstrap-резолвер** — Вручную собирает raw DNS-пакеты и парсит A-записи для первичного резолва незнакомых DoH-доменов.
-- **Автокэширование (bootstrap.json)** — При передаче нового DoH URL автоматически определяет его IP и сохраняет в конфиг для мгновенного старта в будущем.
-- **Эмуляция браузерного TLS Handshake** — Использует wreq с эмуляцией TLS-профиля Firefox 136 для обхода блокировок.
+- **Direct IP connection** — Does not depend on system DNS to resolve the DoH server itself.
+- **Automatic provider discovery** — Detects whether the `--doh` argument is an IP or a domain, resolves it via bootstrap providers, and validates the URL.
+- **Provider fallback** — If the primary provider fails (timeout, connection error, HTTP error), automatically retries with the next provider from `bootstrap.json`.
+- **Bootstrap caching (`bootstrap.json`)** — New DoH URLs passed via `-d` are automatically resolved and appended to the config for instant startup next time.
+- **Browser TLS emulation** — Uses `wreq` with Firefox 136 TLS fingerprint to bypass DPI and blocking.
+- **Request timeouts** — 10s total timeout, 5s connect timeout, 8s per-request timeout to prevent hanging on dead connections.
 
-## Сборка
+## Build
 
 ```bash
 cargo build --release
 ```
 
-## Использование
+## Usage
 
-Запуск с параметрами по умолчанию (порт 5300, провайдер Cloudflare):
+Default settings (port 5300, Cloudflare primary with Google fallback):
 
 ```bash
 ./target/release/doh-stub-rust
 ```
 
-Запуск с кастомным портом и произвольным DoH-провайдером (например, Cloudflare Worker или Google):
+Custom port and provider:
 
 ```bash
-./target/release/doh-stub-rust -p 5300 -d https://your-worker.workers.dev/dns-query
+./target/release/doh-stub-rust -p 53 -d https://dns.google/dns-query
 ```
 
-### Флаги CLI
+Using a direct IP (no domain resolution needed):
 
-- `-p` — Локальный UDP-порт для приема DNS-запросов (по умолчанию: 5300).
-- `-d` — URL DoH-провайдера (по умолчанию: `https://cloudflare-dns.com/dns-query`).
+```bash
+./target/release/doh-stub-rust -p 53 -d https://1.1.1.1/dns-query
+```
 
-## Конфигурация (bootstrap.json)
+### CLI Flags
 
-При первом запуске создается файл `bootstrap.json` с предустановленными провайдерами:
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-p` | Local UDP port for incoming DNS queries | `5300` |
+| `-d` | DoH provider URL | `https://cloudflare-dns.com/dns-query` |
+
+## Provider Validation
+
+When a new provider is passed via `-d`, the stub validates it before use:
+
+- **Scheme** must be `https` — `http` is rejected.
+- **Path** must contain `dns-query` — standard DoH endpoint required.
+- **Host** is automatically detected as either an IP or a domain. Domains are resolved via existing bootstrap providers.
+
+## Fallback Behavior
+
+Providers are tried in order until one succeeds:
+
+1. The provider from `-d` (if it exists in `bootstrap.json`, it is moved to first position).
+2. Remaining providers from `bootstrap.json` in their stored order.
+
+If a provider fails, the error is logged and the next one is attempted immediately. If all providers fail, the query is dropped with a fatal log entry.
+
+## Configuration (`bootstrap.json`)
+
+Created automatically on first run:
 
 ```json
 {
-  "primary": "dns",
+  "primary": "cloudflare",
   "providers": [
     {
       "name": "cloudflare-dns",
@@ -77,13 +106,13 @@ cargo build --release
 }
 ```
 
-Все новые DoH-URL, переданные через флаг `-d`, автоматически подтягиваются, резолвятся и дописываются в этот файл.
+New providers discovered via `-d` are appended to this file automatically.
 
-## Системная интеграция (NixOS / systemd)
+## System Integration (NixOS / systemd)
 
-Чтобы перехватывать весь системный трафик, заблокируйте 53 порт под себя и пропишите `127.0.0.1` в сетевых настройках.
+To intercept all system DNS traffic, bind to port 53 and set `127.0.0.1` as the system resolver.
 
-Пример юнита в NixOS:
+Example NixOS service:
 
 ```nix
 systemd.services.doh-stub = {
@@ -99,3 +128,7 @@ systemd.services.doh-stub = {
   };
 };
 ```
+
+## License
+
+MIT
