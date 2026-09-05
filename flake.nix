@@ -21,7 +21,7 @@
         pkgs = import nixpkgs { inherit system; };
 
         
-
+        proxyUrl = "http://127.0.0.1:10808";
         fhs = pkgs.buildFHSEnv {
 
           name = "rust-doh-env";
@@ -71,15 +71,19 @@
 
 
           profile = ''
-
+            export HTTP_PROXY="${proxyUrl}"
+            export HTTPS_PROXY="${proxyUrl}"
+            export http_proxy="${proxyUrl}"
+            export https_proxy="${proxyUrl}"
+            export ALL_PROXY="${proxyUrl}"
+            export all_proxy="${proxyUrl}"
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
-
-            export ALL_PROXY="socks5://127.0.0.1:10808"
-
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="gcc"
+            export RUSTFLAGS="-C linker=gcc"
            '';
 
 
-          runScript = "bash";
+          runScript = "zsh";
 
         };
 

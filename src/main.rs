@@ -1,20 +1,24 @@
 use clap::Parser;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::UdpSocket;
-use tokio::time::timeout;
-use wreq::Client;
-use wreq_util::Emulation;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::BufReader;
+use std::net::SocketAddr;
 use std::path::Path;
-use rand::seq::SliceRandom;
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tokio::sync::RwLock;
+use wreq::Client;
+
+mod doh;
+mod domain;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Cross-platform DoH stub in Rust with fallback")]
+#[command(
+    author,
+    version,
+    about = "Cross-platform DoH stub in Rust with fallback"
+)]
 struct Args {
     #[arg(short, long, default_value = "5300")]
     port: u16,
@@ -23,7 +27,7 @@ struct Args {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct Provider {
+pub struct Provider {
     name: String,
     domain: String,
     url: String,
@@ -31,13 +35,13 @@ struct Provider {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct BoostrapConfig {
+pub struct BoostrapConfig {
     primary: String,
     providers: Vec<Provider>,
 }
 
 #[derive(Clone)]
-struct DoHClient {
+pub struct DoHClient {
     client: Arc<Client>,
     url: String,
     name: String,
@@ -45,18 +49,20 @@ struct DoHClient {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let parse = Args::parse();
+    let parse = parse;
+    let args = parse;
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     let socket = UdpSocket::bind(&addr).await?;
-    let mut config = load_json("bootstrap.json")?;
+    let config = Arc::new(RwLock::new(load_json("bootstrap.json")?));
 
-    let mut doh_clients: Vec<DoHClient> = Vec::new();
+    let doh_clients: Arc<RwLock<Vec<DoHClient>>> = Arc::new(RwLock::new(Vec::new()));
 
-    for provider in &config.providers {
-        match build_client(provider) {
+    for provider in &config.read().await.providers {
+        match doh::build_client(provider) {
             Ok(client) => {
                 println!("[INIT] {} -> {:?}", provider.name, provider.ips);
-                doh_clients.push(DoHClient {
+                doh_clients.write().await.push(DoHClient {
                     client: Arc::new(client),
                     url: provider.url.clone(),
                     name: provider.name.clone(),
@@ -68,55 +74,119 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let found_in_config = config.providers.iter().any(|p| p.url == args.doh);
-    if !found_in_config {
-        let provider = detect_doh_provider(&args.doh, &config).await?;
-        println!("[INIT] New provider: {} -> {:?}", provider.name, provider.ips);
+    found_in_config(&mut config.clone(), &args, &mut doh_clients.clone()).await?;
 
-        if let Ok(client) = build_client(&provider) {
-            doh_clients.push(DoHClient {
-                client: Arc::new(client),
-                url: provider.url.clone(),
-                name: provider.name.clone(),
-            });
-        }
-        config.providers.push(provider);
-        if let Err(e) = save_json("bootstrap.json", &config) {
-            eprintln!("[WARN] Failed to save bootstrap.json: {}", e);
-        }
-    } else {
-        if let Some(pos) = doh_clients.iter().position(|c| c.url == args.doh) {
-            doh_clients.swap(0, pos);
-        }
-    }
-
-    if doh_clients.is_empty() {
-        return Err("No DoH provider available. Check bootstrap.json.".into());
-    }
-
-    println!("[INIT] Running on {}. Providers (fallback order):", addr);
-    for (i, c) in doh_clients.iter().enumerate() {
-        println!("  {}. {}", i + 1, c.name);
-    }
-
-    let doh_clients = Arc::new(doh_clients);
+    println!("[INFO] UDP server listening on {}", addr);
     let socket = Arc::new(socket);
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 2048]; // Увеличиваем буфер, dig может использовать EDNS0 (>512 байт)
+
+    let cfg_clone = Arc::clone(&config);
+    let clients_clone = Arc::clone(&doh_clients);
+    let doh_url = args.doh.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            let domain_to_resolve = {
+                let config_read = cfg_clone.read().await;
+                config_read
+                    .providers
+                    .iter()
+                    .find(|p| p.url == doh_url)
+                    .map(|p| p.domain.clone())
+            };
+            let domain = match domain_to_resolve {
+                Some(d) => d,
+                None => continue,
+            };
+            let new_ip = match domain::resolve_domain(&domain, &cfg_clone).await {
+                Ok(ip) => ip,
+                Err(e) => {
+                    eprintln!("[BACKGROUND] Failed to resolve {}: {}", domain, e);
+                    continue;
+                }
+            };
+
+            let mut needs_update = false;
+            let mut provider_to_rebuild = None;
+            {
+                let config_read = cfg_clone.read().await;
+                if let Some(provider) = config_read.providers.iter().find(|p| p.url == doh_url) {
+                    if provider.ips.is_empty() || provider.ips[0] != new_ip {
+                        println!("[BACKGROUND] IP changed for {}! New IP: {}", domain, new_ip);
+                        needs_update = true;
+
+                        let mut updated_provider = provider.clone();
+                        updated_provider.ips = vec![new_ip.clone()];
+                        provider_to_rebuild = Some(updated_provider);
+                    }
+                }
+            }
+            if needs_update {
+                if let Some(new_provider) = provider_to_rebuild {
+                    let new_client_opt = {
+                        match doh::build_client(&new_provider) {
+                            Ok(c) => Some(c),
+                            Err(e) => {
+                                eprintln!(
+                                    "[BACKGROUND] Failed to build new client for {}: {}",
+                                    domain, e
+                                );
+                                None
+                            }
+                        }
+                    };
+
+                    if let Some(new_client) = new_client_opt {
+                        let mut clients_write = clients_clone.write().await;
+                        if let Some(client_ref) =
+                            clients_write.iter_mut().find(|c| c.url == doh_url)
+                        {
+                            client_ref.client = Arc::new(new_client);
+                            println!("[BACKGROUND] Replaced HTTP client for {}", domain);
+                        }
+
+                        let mut config_write = cfg_clone.write().await;
+                        if let Some(provider_ref) =
+                            config_write.providers.iter_mut().find(|p| p.url == doh_url)
+                        {
+                            provider_ref.ips = vec![new_ip.clone()];
+                        }
+
+                        drop(config_write);
+                        if let Err(e) = save_json("bootstrap.json", &cfg_clone).await {
+                            eprintln!("[BACKGROUND] Error saving config: {}", e);
+                        } else {
+                            println!("[BACKGROUND] bootstrap.json updated successfully.");
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     loop {
         let (len, client_addr) = socket.recv_from(&mut buf).await?;
+        println!("[DEBUG] Received {} bytes from {}", len, client_addr);
         let q_bytes = buf[..len].to_vec();
 
         let socket_clone = Arc::clone(&socket);
         let clients_clone = Arc::clone(&doh_clients);
 
         tokio::spawn(async move {
-            match doh_forward_with_fallback(&clients_clone, q_bytes).await {
+            match doh::doh_forward_with_fallback(&clients_clone, q_bytes).await {
                 Ok(answer_bytes) => {
                     if let Err(e) = socket_clone.send_to(&answer_bytes, client_addr).await {
                         eprintln!("[UDP] Error sending response to {}: {}", client_addr, e);
                     } else {
-                        println!("[OK] Resolve sent to {}, bytes: {}", client_addr, answer_bytes.len());
+                        println!(
+                            "[OK] Resolve sent to {}, bytes: {}",
+                            client_addr,
+                            answer_bytes.len()
+                        );
                     }
                 }
                 Err(e) => {
@@ -127,109 +197,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn build_client(provider: &Provider) -> Result<Client, Box<dyn std::error::Error>> {
-    let mut rng = rand::thread_rng();
-    let ip_str = provider
-        .ips
-        .choose(&mut rng)
-        .ok_or_else(|| format!("IP array empty for {}", provider.name))?;
+async fn found_in_config(
+    config: &mut Arc<RwLock<BoostrapConfig>>,
+    args: &Args,
+    doh_clients: &mut Arc<RwLock<Vec<DoHClient>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let found_in_config = config
+        .read()
+        .await
+        .providers
+        .iter()
+        .any(|p| p.url == args.doh);
+    if !found_in_config {
+        let provider = doh::detect_doh_provider(&args.doh, &config).await?;
+        println!(
+            "[INIT] New provider: {} -> {:?}",
+            provider.name, provider.ips
+        );
 
-    let sock_addr: SocketAddr = format!("{}:443", ip_str).parse()?;
-    let domain_static: &'static str = Box::leak(provider.domain.clone().into_boxed_str());
-
-    Ok(Client::builder()
-        .emulation(Emulation::Firefox136)
-        .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(5))
-        .resolve(domain_static, sock_addr)
-        .build()?)
-}
-
-async fn detect_doh_provider(
-    doh_url: &str,
-    config: &BoostrapConfig,
-) -> Result<Provider, Box<dyn std::error::Error>> {
-    let parsed = url::Url::parse(doh_url)?;
-    let scheme = parsed.scheme();
-    if scheme != "https" {
-        return Err(format!("Invalid protocol: {}. Only HTTPS allowed", scheme).into());
-    }
-
-    let path = parsed.path();
-    if !path.contains("dns-query") {
-        return Err(format!("Invalid path: {}. Expected /dns-query", path).into());
-    }
-
-    let host_str = parsed.host_str().ok_or("Failed to extract host from URL")?;
-
-    let (name, domain, ips) = if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
-        let ip_str = ip.to_string();
-        (ip_str.clone(), ip_str.clone(), vec![ip_str])
+        if let Ok(client) = doh::build_client(&provider) {
+            doh_clients.write().await.push(DoHClient {
+                client: Arc::new(client),
+                url: provider.url.clone(),
+                name: provider.name.clone(),
+            });
+        }
+        config.write().await.providers.push(provider);
+        if let Err(e) = save_json("bootstrap.json", config).await {
+            eprintln!("[WARN] Failed to save bootstrap.json: {}", e);
+        }
     } else {
-        println!("[INIT] Resolving domain {}...", host_str);
-        let ip_str = resolve_domain(host_str, config).await?;
-        (host_str.to_string(), host_str.to_string(), vec![ip_str])
-    };
+        let pos = {
+            doh_clients
+                .read()
+                .await
+                .iter()
+                .position(|c| c.url == args.doh)
+        };
 
-    Ok(Provider {
-        name,
-        domain,
-        url: doh_url.to_string(),
-        ips,
-    })
-}
-
-async fn doh_forward_with_fallback(
-    clients: &[DoHClient],
-    q: Vec<u8>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut last_err = None;
-
-    for (idx, doh) in clients.iter().enumerate() {
-        match doh_forward(&doh.client, &doh.url, q.clone()).await {
-            Ok(bytes) => {
-                if idx > 0 {
-                    println!("[FALLBACK] Fallback provider triggered: {}", doh.name);
-                }
-                return Ok(bytes);
-            }
-            Err(e) => {
-                eprintln!("[ERR] {} unavailable: {}", doh.name, e);
-                last_err = Some(e);
-            }
+        if let Some(pos) = pos {
+            doh_clients.write().await.swap(0, pos);
         }
     }
 
-    Err(format!(
-        "All providers down. Last error: {:?}",
-        last_err
-    )
-    .into())
-}
-
-async fn doh_forward(
-    client: &wreq::Client,
-    url: &str,
-    q: Vec<u8>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let res = timeout(Duration::from_secs(8), async {
-        client
-            .post(url)
-            .header("Content-Type", "application/dns-message")
-            .header("Accept", "application/dns-message")
-            .body(q)
-            .send()
-            .await
-    })
-    .await
-    .map_err(|_| "Request timeout (8 sec)".to_string())??;
-
-    if !res.status().is_success() {
-        return Err(format!("HTTP Status: {}", res.status()).into());
+    if doh_clients.read().await.is_empty() {
+        return Err("No DoH provider available. Check bootstrap.json.".into());
     }
 
-    let bytes = res.bytes().await?;
-    Ok(bytes.to_vec())
+    Ok(())
 }
 
 fn load_json<P: AsRef<Path>>(path: P) -> Result<BoostrapConfig, Box<dyn std::error::Error>> {
@@ -262,155 +277,11 @@ fn load_json<P: AsRef<Path>>(path: P) -> Result<BoostrapConfig, Box<dyn std::err
     Ok(serde_json::from_reader(reader)?)
 }
 
-fn save_json<P: AsRef<Path>>(
+async fn save_json<P: AsRef<Path>>(
     path: P,
-    config: &BoostrapConfig,
+    config: &Arc<RwLock<BoostrapConfig>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, config)?;
+    serde_json::to_writer_pretty(file, &config.read().await.clone())?;
     Ok(())
-}
-
-async fn resolve_domain(
-    domain: &str,
-    config: &BoostrapConfig,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut last_err = None;
-
-    let mut providers = config.providers.clone();
-    let mut rng = rand::thread_rng();
-    providers.shuffle(&mut rng);
-
-    for provider in &providers {
-        let ip = match provider.ips.choose(&mut rng) {
-            Some(ip) => ip,
-            None => continue,
-        };
-
-        let sock_addr: SocketAddr = format!("{}:443", ip).parse()?;
-        let domain_static: &'static str = Box::leak(provider.domain.clone().into_boxed_str());
-
-        let client = match Client::builder()
-            .emulation(Emulation::Firefox136)
-            .timeout(Duration::from_secs(10))
-            .connect_timeout(Duration::from_secs(5))
-            .resolve(domain_static, sock_addr)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[WARN] Failed to build client for {}: {}", provider.name, e);
-                continue;
-            }
-        };
-
-        let mut packet = Vec::new();
-        packet.extend_from_slice(&[
-            0x00, 0x01, 
-            0x01, 0x00, 
-            0x00, 0x01, 
-            0x00, 0x00,
-            0x00, 0x00,
-            0x00, 0x00, 
-        ]);
-        for part in domain.split('.') {
-            packet.push(part.len() as u8);
-            packet.extend_from_slice(part.as_bytes());
-        }
-        packet.push(0x00);
-        packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
-
-        let res = match timeout(Duration::from_secs(8), async {
-            client
-                .post(&provider.url)
-                .header("Content-Type", "application/dns-message")
-                .header("Accept", "application/dns-message")
-                .body(packet)
-                .send()
-                .await
-        })
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                eprintln!("[WARN] {} did not respond for resolving {}: {}", provider.name, domain, e);
-                last_err = Some(e.to_string());
-                continue;
-            }
-            Err(_) => {
-                eprintln!("[WARN] Resolve timeout via {}", provider.name);
-                last_err = Some("timeout".to_string());
-                continue;
-            }
-        };
-
-        if !res.status().is_success() {
-            last_err = Some(format!("status {}", res.status()));
-            continue;
-        }
-
-        let bytes = match res.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                last_err = Some(e.to_string());
-                continue;
-            }
-        };
-
-        if let Some(ip) = parse_a_record(&bytes) {
-            return Ok(ip);
-        }
-    }
-
-    Err(format!(
-        "Failed to resolve {} via any provider. Last error: {:?}",
-        domain, last_err
-    )
-    .into())
-}
-
-fn parse_a_record(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 12 {
-        return None;
-    }
-    let ancount = u16::from_be_bytes([bytes[6], bytes[7]]);
-    if ancount == 0 {
-        return None;
-    }
-
-    let mut p = 12;
-    while p < bytes.len() && bytes[p] != 0 {
-        let len = bytes[p] as usize;
-        p += 1 + len;
-    }
-    p += 5; 
-
-    for _ in 0..ancount {
-        if p >= bytes.len() {
-            break;
-        }
-        if (bytes[p] & 0xC0) == 0xC0 {
-            p += 2;
-        } else {
-            while p < bytes.len() && bytes[p] != 0 {
-                p += 1 + bytes[p] as usize;
-            }
-            p += 1;
-        }
-        if p + 10 > bytes.len() {
-            break;
-        }
-        let rtype = u16::from_be_bytes([bytes[p], bytes[p + 1]]);
-        let rdlen = u16::from_be_bytes([bytes[p + 8], bytes[p + 9]]) as usize;
-        p += 10;
-
-        if rtype == 1 && rdlen == 4 && p + 4 <= bytes.len() {
-            return Some(format!(
-                "{}.{}.{}.{}",
-                bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]
-            ));
-        }
-        p += rdlen;
-    }
-    None
 }
