@@ -18,9 +18,10 @@ sequenceDiagram
 
     OS->>Stub: Standard DNS query (UDP:53/5300)
     Note over Stub: Check bootstrap.json / Resolve IP / Fallback
-    Stub->>DoH: HTTPS POST (Direct IP + SNI Emulation)
+    Stub->>DoH: HTTPS POST (Direct IP + SNI Emulation + Random TLS)
     DoH->>Stub: Response (application/dns-message)
     Stub->>OS: Standard DNS response (UDP)
+    Note over Stub: Background: hourly IP refresh & client hot-swap
 ```
 
 ## Features
@@ -30,6 +31,9 @@ sequenceDiagram
 - **Provider fallback** — If the primary provider fails (timeout, connection error, HTTP error), automatically retries with the next provider from `bootstrap.json`.
 - **Bootstrap caching (`bootstrap.json`)** — New DoH URLs passed via `-d` are automatically resolved and appended to the config for instant startup next time.
 - **Browser TLS emulation** — Uses `wreq` with Firefox 136 TLS fingerprint to bypass DPI and blocking.
+- **Random TLS fingerprints** — Randomizes TLS Client Hello fingerprints (`Emulation::random()`) on every connection to evade DPI and censorship detection.
+- **Background IP auto-updater** — A background Tokio task automatically resolves and updates the DoH provider's IP address every hour.
+- **Transparent client hot-swap** — Replaces the underlying `wreq` HTTP client transparently when IPs change, without dropping active queries or connections.
 - **Request timeouts** — 10s total timeout, 5s connect timeout, 8s per-request timeout to prevent hanging on dead connections.
 
 ## Build
@@ -81,6 +85,14 @@ Providers are tried in order until one succeeds:
 2. Remaining providers from `bootstrap.json` in their stored order.
 
 If a provider fails, the error is logged and the next one is attempted immediately. If all providers fail, the query is dropped with a fatal log entry.
+
+## Anti-Censorship & DPI Evasion
+
+To resist deep-packet inspection and blocking, `doh-stub` employs multiple layers:
+
+1. **Random TLS fingerprints** — Every HTTPS connection uses a randomized TLS Client Hello fingerprint (`Emulation::random()`), making it harder for DPI systems to fingerprint or block the stub based on static TLS signatures.
+2. **Browser SNI emulation** — The TLS handshake mimics a real browser (Firefox 136), blending into normal HTTPS traffic.
+3. **Direct IP connection** — Bypasses system DNS entirely, preventing local DNS-based blocking from affecting the DoH path.
 
 ## Configuration (`bootstrap.json`)
 
