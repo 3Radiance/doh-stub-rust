@@ -31,7 +31,7 @@ pub async fn resolve_domain(
         };
 
         let sock_addr: SocketAddr = format!("{}:443", ip).parse()?;
-        let domain_static: &'static str = Box::leak(provider.domain.clone().into_boxed_str());
+        let domain_static = provider.domain.clone();
 
         let client = match Client::builder()
             .emulation(Emulation::random())

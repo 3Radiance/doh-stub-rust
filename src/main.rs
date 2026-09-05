@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[INFO] UDP server listening on {}", addr);
     let socket = Arc::new(socket);
-    let mut buf = [0u8; 2048]; // Увеличиваем буфер, dig может использовать EDNS0 (>512 байт)
+    let mut buf = [0u8; 2048];
 
     let cfg_clone = Arc::clone(&config);
     let clients_clone = Arc::clone(&doh_clients);
