@@ -38,7 +38,44 @@ sequenceDiagram
 
 ## Build
 
+### Native / Linux (Any OS/distro except NixOS)
+
 ```bash
+cargo build --release
+```
+
+### Windows/Android/Static Linux binary/NixOS
+
+If you are using NixOS, you can cross-compile:
+#### Windows
+```bash
+mv flake.windows.nix flake.nix
+
+nix develop
+cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+#### Android
+```bash
+mv flake.android.nix flake.nix
+
+nix develop
+cargo build --release --target aarch64-linux-android
+```
+
+#### Static Linux binary
+```bash
+mv flake.linux.nix flake.nix
+
+nix develop
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+#### NixOS
+```bash
+mv flake.nixos.nix flake.nix
+
+nix develop
 cargo build --release
 ```
 
@@ -53,13 +90,13 @@ Default settings (port 5300, Cloudflare primary with Google fallback):
 Custom port and provider:
 
 ```bash
-./target/release/doh-stub-rust -p 53 -d https://dns.google/dns-query
+./target/release/doh-stub-rust -p 53 -P 0-50 -d https://dns.google/dns-query
 ```
 
 Using a direct IP (no domain resolution needed):
 
 ```bash
-./target/release/doh-stub-rust -p 53 -d https://1.1.1.1/dns-query
+./target/release/doh-stub-rust -p 53 -P 100-500 -d https://1.1.1.1/dns-query
 ```
 
 ### CLI Flags

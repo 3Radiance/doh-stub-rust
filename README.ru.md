@@ -38,7 +38,44 @@ sequenceDiagram
 
 ## Сборка
 
+### Локальная сборка (любая ОС/дистрибутив, кроме NixOS)
+
 ```bash
+cargo build --release
+```
+
+### Сборка под Windows/Android/Статический Linux/NixOS
+
+Если вы используете NixOS, вы можете кросс-компилировать:
+#### Windows
+```bash
+mv flake.windows.nix flake.nix
+
+nix develop
+cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+#### Android
+```bash
+mv flake.android.nix flake.nix
+
+nix develop
+cargo build --release --target aarch64-linux-android
+```
+
+#### Статический Linux
+```bash
+mv flake.linux.nix flake.nix
+
+nix develop
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+#### NixOS
+```bash
+mv flake.nixos.nix flake.nix
+
+nix develop
 cargo build --release
 ```
 
@@ -53,13 +90,13 @@ cargo build --release
 Кастомный порт и провайдер:
 
 ```bash
-./target/release/doh-stub-rust -p 53 -d https://dns.google/dns-query
+./target/release/doh-stub-rust -p 53 -P 100-500 -d https://dns.google/dns-query
 ```
 
 Прямой IP (резолв домена не нужен):
 
 ```bash
-./target/release/doh-stub-rust -p 53 -d https://1.1.1.1/dns-query
+./target/release/doh-stub-rust -p 53 -P 0-10 -d https://1.1.1.1/dns-query
 ```
 
 ### Флаги CLI
