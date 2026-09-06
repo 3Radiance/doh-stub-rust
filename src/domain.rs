@@ -7,11 +7,14 @@ use tokio::time::timeout;
 use wreq::Client;
 use wreq_util::Emulation;
 
+use crate::Args;
 use crate::BoostrapConfig;
+use crate::padding::{PaddingMethod, PaddingPlacement, build_padding_header};
 
 pub async fn resolve_domain(
     domain: &str,
     config: &Arc<RwLock<BoostrapConfig>>,
+    args: &Args,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut last_err = None;
 
@@ -59,13 +62,25 @@ pub async fn resolve_domain(
         packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
 
         let res = match timeout(Duration::from_secs(8), async {
-            client
+            let mut req = client
                 .post(&provider.url)
                 .header("Content-Type", "application/dns-message")
-                .header("Accept", "application/dns-message")
-                .body(packet)
-                .send()
-                .await
+                .header("Accept", "application/dns-message");
+
+            let pad_size = args.padding.sample();
+            if pad_size > 0 {
+                if let Some((name, value)) = build_padding_header(
+                    PaddingMethod::Tokenish,
+                    PaddingPlacement::Header {
+                        header_name: "X-Padding".to_string(),
+                    },
+                    pad_size,
+                ) {
+                    req = req.header(name, value);
+                }
+            }
+
+            req.body(packet).send().await
         })
         .await
         {

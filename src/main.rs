@@ -12,18 +12,68 @@ use wreq::Client;
 
 mod doh;
 mod domain;
+mod padding;
 
-#[derive(Parser, Debug)]
+#[derive(Debug, Clone)]
+pub struct PaddingRange {
+    pub from: u16,
+    pub to: u16,
+}
+
+impl PaddingRange {
+    pub fn sample(&self) -> usize {
+        if self.to == 0 {
+            return 0;
+        }
+        if self.from == self.to {
+            return self.from as usize;
+        }
+        use rand::Rng;
+        rand::thread_rng().gen_range(self.from..=self.to) as usize
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.to == 0
+    }
+}
+
+impl std::str::FromStr for PaddingRange {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((a, b)) = s.split_once('-') {
+            let from = a
+                .parse::<u16>()
+                .map_err(|_| format!("invalid range start: {}", a))?;
+            let to = b
+                .parse::<u16>()
+                .map_err(|_| format!("invalid range end: {}", b))?;
+            if from > to {
+                return Err(format!("range start {} > end {}", from, to));
+            }
+            Ok(PaddingRange { from, to })
+        } else {
+            let n = s
+                .parse::<u16>()
+                .map_err(|_| format!("invalid padding value: {}", s))?;
+            Ok(PaddingRange { from: n, to: n })
+        }
+    }
+}
+
+#[derive(Parser, Debug, Clone)]
 #[command(
     author,
     version,
     about = "Cross-platform DoH stub in Rust with fallback"
 )]
-struct Args {
+pub struct Args {
     #[arg(short, long, default_value = "5300")]
     port: u16,
     #[arg(short, long, default_value = "https://cloudflare-dns.com/dns-query")]
     doh: String,
+    #[arg(short = 'P', long, default_value = "0")]
+    padding: PaddingRange,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -49,9 +99,7 @@ pub struct DoHClient {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let parse = Args::parse();
-    let parse = parse;
-    let args = parse;
+    let args = Args::parse();
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     let socket = UdpSocket::bind(&addr).await?;
     let config = Arc::new(RwLock::new(load_json("bootstrap.json")?));
@@ -83,6 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg_clone = Arc::clone(&config);
     let clients_clone = Arc::clone(&doh_clients);
     let doh_url = args.doh.clone();
+    let args_clone = args.clone();
+    let args_for_loop = args.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -102,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(d) => d,
                 None => continue,
             };
-            let new_ip = match domain::resolve_domain(&domain, &cfg_clone).await {
+            let new_ip = match domain::resolve_domain(&domain, &cfg_clone, &args_clone).await {
                 Ok(ip) => ip,
                 Err(e) => {
                     eprintln!("[BACKGROUND] Failed to resolve {}: {}", domain, e);
@@ -175,9 +225,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let socket_clone = Arc::clone(&socket);
         let clients_clone = Arc::clone(&doh_clients);
+        let args_req = args_for_loop.clone();
 
         tokio::spawn(async move {
-            match doh::doh_forward_with_fallback(&clients_clone, q_bytes).await {
+            match doh::doh_forward_with_fallback(&clients_clone, q_bytes, &args_req).await {
                 Ok(answer_bytes) => {
                     if let Err(e) = socket_clone.send_to(&answer_bytes, client_addr).await {
                         eprintln!("[UDP] Error sending response to {}: {}", client_addr, e);
@@ -209,7 +260,7 @@ async fn found_in_config(
         .iter()
         .any(|p| p.url == args.doh);
     if !found_in_config {
-        let provider = doh::detect_doh_provider(&args.doh, &config).await?;
+        let provider = doh::detect_doh_provider(args, config).await?;
         println!(
             "[INIT] New provider: {} -> {:?}",
             provider.name, provider.ips

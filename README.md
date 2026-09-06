@@ -30,11 +30,11 @@ sequenceDiagram
 - **Automatic provider discovery** — Detects whether the `--doh` argument is an IP or a domain, resolves it via bootstrap providers, and validates the URL.
 - **Provider fallback** — If the primary provider fails (timeout, connection error, HTTP error), automatically retries with the next provider from `bootstrap.json`.
 - **Bootstrap caching (`bootstrap.json`)** — New DoH URLs passed via `-d` are automatically resolved and appended to the config for instant startup next time.
-- **Browser TLS emulation** — Uses `wreq` with Firefox 136 TLS fingerprint to bypass DPI and blocking.
 - **Random TLS fingerprints** — Randomizes TLS Client Hello fingerprints (`Emulation::random()`) on every connection to evade DPI and censorship detection.
 - **Background IP auto-updater** — A background Tokio task automatically resolves and updates the DoH provider's IP address every hour.
 - **Transparent client hot-swap** — Replaces the underlying `wreq` HTTP client transparently when IPs change, without dropping active queries or connections.
 - **Request timeouts** — 10s total timeout, 5s connect timeout, 8s per-request timeout to prevent hanging on dead connections.
+- **HPACK-aware traffic padding (`-P`)** — Adds random-byte padding to requests, sized to account for HPACK/QPACK header compression (ported from Xray's XHTTP padding logic), so the padded size actually survives on the wire instead of being compressed away. Disabled by default (`-P 0`), a fixed size (`-P 500`), or a random size picked from a range (`-P 100-500`) on every request.
 
 ## Build
 
@@ -68,6 +68,7 @@ Using a direct IP (no domain resolution needed):
 |------|-------------|---------|
 | `-p` | Local UDP port for incoming DNS queries | `5300` |
 | `-d` | DoH provider URL | `https://cloudflare-dns.com/dns-query` |
+| `-P` | Padding size: `0` (disabled), a fixed value (`500`), or a range (`100-500`) | `0` |
 
 ## Provider Validation
 
@@ -91,8 +92,9 @@ If a provider fails, the error is logged and the next one is attempted immediate
 To resist deep-packet inspection and blocking, `doh-stub` employs multiple layers:
 
 1. **Random TLS fingerprints** — Every HTTPS connection uses a randomized TLS Client Hello fingerprint (`Emulation::random()`), making it harder for DPI systems to fingerprint or block the stub based on static TLS signatures.
-2. **Browser SNI emulation** — The TLS handshake mimics a real browser (Firefox 136), blending into normal HTTPS traffic.
+2. **Browser SNI emulation** — The TLS handshake mimics a real browser, blending into normal HTTPS traffic.
 3. **Direct IP connection** — Bypasses system DNS entirely, preventing local DNS-based blocking from affecting the DoH path.
+4. **HPACK-aware padding (`-P`)** — Randomizes request size to defeat length-based traffic analysis. Naive padding gets mostly eaten by HPACK/QPACK header compression, so the padding size is calculated to survive compression and still land close to the requested size on the wire.
 
 ## Configuration (`bootstrap.json`)
 
@@ -132,7 +134,7 @@ systemd.services.doh-stub = {
   after = [ "network.target" ];
   wantedBy = [ "multi-user.target" ];
   serviceConfig = {
-    ExecStart = "/path/to/doh-stub-rust -p 53 -d https://your-doh-provider.com/dns-query";
+    ExecStart = "/path/to/doh-stub-rust -p 53 -P 100-200 -d https://your-doh-provider.com/dns-query";
     WorkingDirectory = "/path/to/doh-dir";
     Restart = "always";
     RestartSec = "3s";
