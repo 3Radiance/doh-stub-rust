@@ -58,11 +58,11 @@
     
             TOOLCHAIN_WRAPPER="/tmp/android_aarch64_toolchain.cmake"
             cat <<EOF > "$TOOLCHAIN_WRAPPER"
-set(ANDROID_ABI "arm64-v8a" CACHE STRING "" FORCE)
-set(ANDROID_PLATFORM "android-29" CACHE STRING "" FORCE)
-set(ANDROID_STL "c++_static" CACHE STRING "" FORCE)
-include("$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake")
-EOF
+            set(ANDROID_ABI "arm64-v8a" CACHE STRING "" FORCE)
+            set(ANDROID_PLATFORM "android-29" CACHE STRING "" FORCE)
+            set(ANDROID_STL "c++_static" CACHE STRING "" FORCE)
+            include("$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake")
+            EOF
 
             export CMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_WRAPPER"
             export CMAKE_TOOLCHAIN_FILE_aarch64_linux_android="$TOOLCHAIN_WRAPPER"
